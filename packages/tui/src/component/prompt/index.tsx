@@ -1155,7 +1155,12 @@ export function Prompt(props: PromptProps) {
       slashHead !== undefined &&
       (data.location.command.list(currentLocation.ref) ?? []).some((command) => command.name === slashHead.name)
     const editorSelection = editorContext()
-    const pendingEditorSelection = editorSelection && editor.labelState() === "pending" ? editorSelection : undefined
+    const explicitEditorContext = store.prompt.files?.some(
+      (file) =>
+        file.description === "IDE selection snapshot" || file.description === "Current IDE file (saved contents)",
+    )
+    const pendingEditorSelection =
+      !explicitEditorContext && editorSelection && editor.labelState() === "pending" ? editorSelection : undefined
     if (delivery === "queue" && pendingEditorSelection) {
       toast.show({ message: "Editor context cannot be queued", variant: "warning" })
       return false
@@ -1967,6 +1972,7 @@ export function Prompt(props: PromptProps) {
         </box>
       </box>
       <Autocomplete
+        files={store.prompt.files}
         sessionID={props.sessionID}
         argumentAutocomplete={(command) => (command.id === "session.cd" ? "directory" : undefined)}
         directoryOptions={(query): AutocompleteOption[] => {

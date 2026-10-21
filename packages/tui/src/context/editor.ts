@@ -43,7 +43,7 @@ const EditorSelectionRangesSchema = Schema.Struct({
 const EditorSelectionSchema = Schema.Union([
   EditorSelectionRangesSchema,
   Schema.Struct({
-    text: Schema.String,
+    text: Schema.optional(Schema.String),
     filePath: Schema.String,
     source: Schema.optional(Schema.Literals(["websocket", "zed"])),
     selection: Schema.Struct({
@@ -61,7 +61,7 @@ const EditorSelectionSchema = Schema.Union([
             source: value.source,
             ranges: [
               {
-                text: value.text,
+                text: value.text ?? "",
                 selection: value.selection,
               },
             ],
@@ -234,8 +234,8 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
         if (!message) return
 
         const selection = message.method === "selection_changed" ? decodeEditorSelection(message.params) : Option.none()
-        if (Option.isSome(selection)) {
-          setSelection({ ...selection.value, source: "websocket" })
+        if (message.method === "selection_changed") {
+          setSelection(Option.isSome(selection) ? { ...selection.value, source: "websocket" } : undefined)
           return
         }
 
@@ -268,6 +268,7 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
         pending.clear()
         if (closed) return
 
+        setSelection(undefined)
         setStore("status", "connecting")
         scheduleReconnect()
       })

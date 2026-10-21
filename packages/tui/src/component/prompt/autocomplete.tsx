@@ -26,6 +26,8 @@ import { stringWidth } from "../../util/string-width"
 import { parseFileLineRange, stripFileLineRange } from "../../prompt/parse"
 import { moveSelection, reconcileSelectionWindow, revealSelectionOffset } from "../../ui/select-controller"
 import { directoryAutocomplete, slashArgumentAutocomplete } from "../../prompt/directory-completion"
+import { editorAttachment } from "./editor-attachment"
+import { useToast } from "../../ui/toast"
 
 export type AutocompleteRef = {
   onInput: (value: string) => void
@@ -44,7 +46,7 @@ export type AutocompleteOption = {
   path?: string
   absolute?: string
   destructive?: { id: string; confirm: string; run: () => void }
-  kind?: "skill" | "agent" | "reference"
+  kind?: "skill" | "agent" | "reference" | "editor"
   queueable?: boolean
 }
 
@@ -58,6 +60,7 @@ type AutocompleteResults = {
 
 export function Autocomplete(props: {
   value: string
+  files?: PromptInfo["files"]
   sessionID?: string
   argumentAutocomplete?: (command: KeymapCommand) => "directory" | undefined
   directoryOptions?: (query: string) => AutocompleteOption[]
@@ -82,6 +85,7 @@ export function Autocomplete(props: {
   const dimensions = useTerminalDimensions()
   const frecency = useFrecency()
   const config = useConfig().data
+  const toast = useToast()
   const paths = useTuiPaths()
   const location = useLocation()
   const [store, setStore] = createStore({
@@ -161,6 +165,8 @@ export function Autocomplete(props: {
     if (part.type === "skill" && props.hasSkill(part.value.id)) return
     const input = props.input()
     const currentCursorOffset = input.cursorOffset
+    const existingFileIndex =
+      part.type === "file" ? (props.files?.findIndex((file) => file.uri === part.value.uri) ?? -1) : -1
 
     const needsSpace = input.getTextRange(currentCursorOffset, currentCursorOffset + 1) !== " "
     const prefix = "@"
@@ -172,6 +178,15 @@ export function Autocomplete(props: {
     const endCursor = input.logicalCursor
 
     input.deleteRange(startCursor.row, startCursor.col, endCursor.row, endCursor.col)
+    if (part.type === "file" && props.files?.[existingFileIndex]?.mention) {
+      props.setPrompt((draft) => {
+        const existing = draft.files![existingFileIndex]
+        if (part.value.name !== undefined) existing.name = part.value.name
+        if (part.value.description !== undefined) existing.description = part.value.description
+        draft.text = input.plainText
+      })
+      return
+    }
     input.insertText(append)
 
     const virtualText = prefix + text
@@ -192,23 +207,19 @@ export function Autocomplete(props: {
     props.setPrompt((draft) => {
       if (part.type === "file") {
         const files = (draft.files ??= [])
-        const existingIndex = files.findIndex((file) => file.uri === part.value.uri)
-        if (existingIndex !== -1) {
-          const existing = files[existingIndex]
-          if (existing?.mention) {
-            existing.mention.start = extmarkStart
-            existing.mention.end = extmarkEnd
-            existing.mention.text = virtualText
-          }
-          return
-        }
         if (part.value.mention) {
           part.value.mention.start = extmarkStart
           part.value.mention.end = extmarkEnd
           part.value.mention.text = virtualText
         }
-        const index = files.length
-        files.push(part.value)
+        const index = existingFileIndex === -1 ? files.length : existingFileIndex
+        if (existingFileIndex === -1) files.push(part.value)
+        if (existingFileIndex !== -1) {
+          const existing = files[index]
+          if (part.value.name !== undefined) existing.name = part.value.name
+          if (part.value.description !== undefined) existing.description = part.value.description
+          existing.mention = part.value.mention
+        }
         props.setExtmark({ type: "file", index }, extmarkId)
         return
       }
@@ -278,6 +289,7 @@ export function Autocomplete(props: {
   const referenceMatch = createMemo(() => {
     if (store.visible !== "reference") return
     const base = parseFileLineRange(search()).base
+    if (base === "selection" || base === "thisfile") return
     const slash = base.indexOf("/")
     const alias = slash === -1 ? base : base.slice(0, slash)
     return references().find((item) => !item.hidden && item.name === alias)
@@ -517,6 +529,31 @@ export function Autocomplete(props: {
     })
   })
 
+  const editorOptions = createMemo((): AutocompleteOption[] =>
+    (["selection", "thisfile"] as const).map((kind) => ({
+      display: `@${kind}`,
+      value: kind,
+      kind: "editor",
+      description: !editor.connected()
+        ? "No IDE connected"
+        : kind === "selection"
+          ? "IDE selection snapshot"
+          : "Current saved file from the IDE",
+      onSelect() {
+        if (!editor.connected()) {
+          toast.show({ message: "No IDE connected", variant: "error" })
+          return
+        }
+        try {
+          const file = editorAttachment(kind, editor.selection())
+          insertPart(`${kind}:${file.name}`, { type: "file", value: file })
+        } catch (error) {
+          toast.show({ message: error instanceof Error ? error.message : String(error), variant: "error" })
+        }
+      },
+    })),
+  )
+
   const options = createMemo(() => {
     const fileSearch = visibleFiles()
     const referenceMatchValue = referenceMatch()
@@ -540,7 +577,7 @@ export function Autocomplete(props: {
     const fileOptions: AutocompleteOption[] = store.visible === "reference" ? fileSearch.options : []
     const nonFileOptions: AutocompleteOption[] =
       store.visible === "reference"
-        ? [...skillOptions(), ...referenceAliasesValue, ...agentsValue]
+        ? [...editorOptions(), ...skillOptions(), ...referenceAliasesValue, ...agentsValue]
         : store.index === 0
           ? [...commandsValue]
           : []
@@ -853,6 +890,7 @@ export function Autocomplete(props: {
     skill: "skill",
     agent: "agent",
     reference: "reference",
+    editor: "IDE",
   }
 
   return (
